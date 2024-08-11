@@ -1,5 +1,6 @@
 import { TimeSpan, createDate, isWithinExpirationDate } from "oslo";
 import { CookieController } from "oslo/cookie";
+import { sign, verify, SignOptions, VerifyOptions } from "jsonwebtoken";
 
 import type { Cookie } from "oslo/cookie";
 import type { Adapter } from "./database.js";
@@ -27,17 +28,28 @@ export interface Session extends SessionAttributes {
 	userId: UserId;
 }
 
+export interface JWTOptions {
+	id: string;
+	signOptions: SignOptions;
+	verifyOptions: VerifyOptions;
+	user: Record<string, any>;
+}
+
 export interface User extends UserAttributes {
 	id: UserId;
 }
 
 export class Lucia<
 	_SessionAttributes extends {} = Record<never, never>,
-	_UserAttributes extends {} = Record<never, never>
+	_UserAttributes extends {} = Record<never, never>,
+	_JWTTokens extends {} = Record<never, never>
 > {
-	private adapter: Adapter;
-	private sessionExpiresIn: TimeSpan;
+	private adapter: Adapter | null;
+	private sessionExpiresIn: TimeSpan | null;
 	private sessionCookieController: CookieController;
+	private useJWT: boolean | null;
+	private jwtSecret: string | null;
+	private jwtOptions: JWTOptions | null;
 
 	private getSessionAttributes: (
 		databaseSessionAttributes: RegisteredDatabaseSessionAttributes
@@ -47,13 +59,20 @@ export class Lucia<
 		databaseUserAttributes: RegisteredDatabaseUserAttributes
 	) => _UserAttributes;
 
+	public createJWTToken: (options?: SignOptions, user?: Record<string, any>) => _JWTTokens;
+
+	public verifyJWTToken: (token?: string, secret?: string) => _JWTTokens;
+
 	public readonly sessionCookieName: string;
 
 	constructor(
-		adapter: Adapter,
+		adapter?: Adapter,
 		options?: {
 			sessionExpiresIn?: TimeSpan;
 			sessionCookie?: SessionCookieOptions;
+			useJWT?: boolean;
+			jwtSecret?: string;
+			jwtOptions?: JWTOptions;
 			getSessionAttributes?: (
 				databaseSessionAttributes: RegisteredDatabaseSessionAttributes
 			) => _SessionAttributes;
@@ -62,7 +81,10 @@ export class Lucia<
 			) => _UserAttributes;
 		}
 	) {
-		this.adapter = adapter;
+		this.adapter = adapter ?? null;
+		this.useJWT = options?.useJWT ?? false;
+		this.jwtSecret = options?.jwtSecret ?? null;
+		this.jwtOptions = options?.jwtOptions ?? null;
 
 		// we have to use `any` here since TS can't do conditional return types
 		this.getUserAttributes = (databaseUserAttributes): any => {
@@ -71,12 +93,60 @@ export class Lucia<
 			}
 			return {};
 		};
+
 		this.getSessionAttributes = (databaseSessionAttributes): any => {
 			if (options && options.getSessionAttributes) {
 				return options.getSessionAttributes(databaseSessionAttributes);
 			}
 			return {};
 		};
+
+		this.createJWTToken = (options?: SignOptions, user?: Record<string, any>): any => {
+			try {
+				if (this.useJWT && this.jwtSecret) {
+					if (options && user) {
+						const token = sign(user, this.jwtSecret, options);
+						return {
+							token,
+							expiresAt: options.expiresIn
+						};
+					}
+					if (this.jwtOptions) {
+						const token = sign(this.jwtOptions.user, this.jwtSecret, this.jwtOptions.signOptions);
+						return {
+							token,
+							expiresAt: this.jwtOptions.signOptions.expiresIn
+						};
+					}
+				}
+				throw new Error("Creating Token Failed.");
+			} catch (error) {
+				throw new Error("Creating Token Failed.");
+			}
+		};
+
+		this.verifyJWTToken = (token?: string, secret?: string): any => {
+			try {
+				if (this.useJWT && this.jwtSecret) {
+					if (token && secret) {
+						const decoded = verify(token, secret);
+						return decoded;
+					}
+					if (this.jwtOptions) {
+						const decoded = verify(
+							this.jwtOptions.id,
+							this.jwtSecret,
+							this.jwtOptions.verifyOptions
+						);
+						return decoded;
+					}
+				}
+				throw new Error("Verifying Token Failed.");
+			} catch (error) {
+				throw new Error("Verifying Token Failed.");
+			}
+		};
+
 		this.sessionExpiresIn = options?.sessionExpiresIn ?? new TimeSpan(30, "d");
 		this.sessionCookieName = options?.sessionCookie?.name ?? "auth_session";
 		let sessionCookieExpiresIn = this.sessionExpiresIn;
@@ -100,6 +170,9 @@ export class Lucia<
 	}
 
 	public async getUserSessions(userId: UserId): Promise<Session[]> {
+		if (!this.adapter) {
+			throw new Error("No adapter provided.");
+		}
 		const databaseSessions = await this.adapter.getUserSessions(userId);
 		const sessions: Session[] = [];
 		for (const databaseSession of databaseSessions) {
@@ -120,6 +193,9 @@ export class Lucia<
 	public async validateSession(
 		sessionId: string
 	): Promise<{ user: User; session: Session } | { user: null; session: null }> {
+		if (!this.adapter || !this.sessionExpiresIn) {
+			throw new Error("No adapter provided.");
+		}
 		const [databaseSession, databaseUser] = await this.adapter.getSessionAndUser(sessionId);
 		if (!databaseSession) {
 			return { session: null, user: null };
@@ -161,6 +237,9 @@ export class Lucia<
 			sessionId?: string;
 		}
 	): Promise<Session> {
+		if (!this.adapter || !this.sessionExpiresIn) {
+			throw new Error("No adapter provided.");
+		}
 		const sessionId = options?.sessionId ?? generateIdFromEntropySize(25);
 		const sessionExpiresAt = createDate(this.sessionExpiresIn);
 		await this.adapter.setSession({
@@ -180,14 +259,23 @@ export class Lucia<
 	}
 
 	public async invalidateSession(sessionId: string): Promise<void> {
+		if (!this.adapter) {
+			throw new Error("No adapter provided.");
+		}
 		await this.adapter.deleteSession(sessionId);
 	}
 
 	public async invalidateUserSessions(userId: UserId): Promise<void> {
+		if (!this.adapter) {
+			throw new Error("No adapter provided.");
+		}
 		await this.adapter.deleteUserSessions(userId);
 	}
 
 	public async deleteExpiredSessions(): Promise<void> {
+		if (!this.adapter) {
+			throw new Error("No adapter provided.");
+		}
 		await this.adapter.deleteExpiredSessions();
 	}
 
