@@ -16,6 +16,8 @@ export type { CookieAttributes } from "oslo/cookie";
 
 import type { Lucia } from "./core.js";
 
+export type { JWTOptions } from "./core.js";
+
 export interface Register {}
 
 export type UserId = Register extends {
